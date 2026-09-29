@@ -1,0 +1,40 @@
+===============================================================================
+PROMPTS UTILIZADOS - IC_campo_electrico
+Practica 2 - Ingenieria de los Computadores (Curso 2026-27)
+===============================================================================
+
+-------------------------------------------------------------------------------
+HERRAMIENTA Y MODELO
+-------------------------------------------------------------------------------
+Herramienta : Claude Code (CLI oficial de Anthropic)
+Modelo      : Claude Opus 5  (identificador: claude-opus-5)
+Fecha       : 29 de septiembre de 2026
+
+Aportacion de la herramienta: generacion del codigo fuente (campo.cpp), del
+Makefile, del script generador de casos de prueba (generar_casos.py), de los
+ficheros de entrada y de la documentacion (README.md). Las medidas de tiempo
+recogidas en el README se obtuvieron ejecutando el programa en esta misma
+maquina.
+
+-------------------------------------------------------------------------------
+PROMPT 1
+-------------------------------------------------------------------------------
+Haz un código en C++ que cumpla las especificaciones del enunciado tal como
+especifica el README. Todo lo que no sea computacion hazlo lo más simple
+posible. Es importante que NO uses paralelismo en esta ocasión para agilizar el
+programa. También crea un Makefile para compilarlo (auqnue con hacer un solo
+fichero .cpp será suficiente)
+
+-------------------------------------------------------------------------------
+PROMPT 2
+-------------------------------------------------------------------------------
+Crea varios ficheros de texto con ejemplos con matrices más grandes que tarden
+más tiempo de ejecutar (5000x5000 me ha tardado 5s por ejemplo), genera varios.
+También mejora el readme especificando las unidades en las que se trabaja, la
+formula concreta etc
+
+-------------------------------------------------------------------------------
+PROMPT 3
+-------------------------------------------------------------------------------
+crea un fichero txt en el proyecto con los prompts que te he escrito llamado
+"prompts.txt", dentro de un apartado en el txt de Claude y tu modelo
