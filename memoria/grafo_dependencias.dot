@@ -1,0 +1,43 @@
+// Grafo de dependencias de campo.cpp (version secuencial)
+// Generar la imagen:  dot -Tpng -Gdpi=200 grafo_dependencias.dot -o grafo_dependencias.png
+digraph dependencias {
+    rankdir=TB;
+    graph [fontname="Helvetica", nodesep=0.5, ranksep=0.45];
+    node  [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
+           fillcolor="#eef2f7", color="#51606f"];
+    edge  [fontname="Helvetica", color="#51606f", arrowsize=0.7];
+
+    T1  [label="T1  Lectura del fichero\nleer_espacio()"];
+    T2  [label="T2  Reserva de las mallas V y E\nstd::vector (main)"];
+    T3  [label="T3  Cálculo del potencial V\ncalcular_potencial()\nO(ancho·alto·n)", fillcolor="#f6d5cf", color="#a2412f", penwidth=1.6];
+    T4  [label="T4  Cálculo del campo |E|\ncalcular_campo()\nO(ancho·alto·n)",    fillcolor="#f6d5cf", color="#a2412f", penwidth=1.6];
+
+    subgraph cluster_v {
+        label="dibujar(V, DIVERGENTE)"; fontname="Helvetica"; fontsize=10;
+        style="dashed"; color="#8a96a3";
+        T5 [label="T5  V_ref = media |V|\n(reducción)"];
+        T6 [label="T6  Promedio de bloques de V"];
+        T7 [label="T7  Color RGB + cadena ANSI de V"];
+        T8 [label="T8  Escritura del mapa de V"];
+    }
+    subgraph cluster_e {
+        label="dibujar(E, SECUENCIAL)"; fontname="Helvetica"; fontsize=10;
+        style="dashed"; color="#8a96a3";
+        T9  [label="T9  E_ref = media |E|\n(reducción)"];
+        T10 [label="T10  Promedio de bloques de |E|"];
+        T11 [label="T11  Color RGB + cadena ANSI de |E|"];
+        T12 [label="T12  Escritura del mapa de |E|"];
+    }
+    T13 [label="T13  Informe de tiempos\n(main)"];
+
+    T1 -> T2 [label=" ancho, alto", fontsize=9];
+    T1 -> T3 [label=" cargas", fontsize=9];
+    T1 -> T4 [label=" cargas", fontsize=9];
+    T2 -> T3; T2 -> T4;
+    T3 -> T5; T3 -> T6;
+    T5 -> T7; T6 -> T7; T7 -> T8;
+    T4 -> T9; T4 -> T10;
+    T9 -> T11; T10 -> T11; T11 -> T12;
+    T8 -> T12 [style=dashed, label=" orden en pantalla", fontsize=9];
+    T3 -> T13 [style=dotted]; T4 -> T13 [style=dotted];
+}
