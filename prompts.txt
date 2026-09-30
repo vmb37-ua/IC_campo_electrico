@@ -50,3 +50,13 @@ PROMPT 5
 -------------------------------------------------------------------------------
 Resume el apartado del modelo físico en unas pocas líneas y
 genera un texto que se pueda copiar y pegar en google docs
+
+-------------------------------------------------------------------------------
+PROMPT 6
+-------------------------------------------------------------------------------
+Estudia el camino crítico de las dependencias del programa
+
+-------------------------------------------------------------------------------
+PROMPT 7
+-------------------------------------------------------------------------------
+Explica el false sahring entre hilos
