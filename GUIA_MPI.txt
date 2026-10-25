@@ -1,0 +1,585 @@
+===============================================================================
+ GUÍA: PARALELIZAR campo.cpp CON MPI  (Práctica 3 - Tarea 3)
+===============================================================================
+
+Índice
+  0. Idea general
+  1. Preparación (fichero nuevo, Makefile)
+  2. Paso 1 - Inicializar MPI
+  3. Paso 2 - Leer el fichero en el rank 0 y repartirlo (MPI_Bcast)
+  4. Paso 3 - Repartir las filas de la malla entre los procesos
+  5. Paso 4 - Adaptar los núcleos de cálculo a un rango de filas
+  6. Paso 5 - Reservar memoria
+  7. Paso 6 - Medir el tiempo y calcular
+  8. Paso 7 - Reunir los resultados en el rank 0 (MPI_Gatherv)
+  9. Paso 8 - Tiempo global (MPI_Reduce) y salida
+ 10. Paso 9 - Finalizar
+ 11. Estrategia B: paralelismo funcional (MPI_Comm_split + Send/Recv)
+ 12. Compilar, ejecutar y comprobar
+ 13. Errores típicos
+
+
+-------------------------------------------------------------------------------
+0. IDEA GENERAL
+-------------------------------------------------------------------------------
+
+Con "mpirun -np N ./campo_mpi" se lanzan N copias del MISMO programa. Cada
+copia (proceso) tiene su propia memoria y un número de identificación, el
+"rank" (0 .. N-1). No hay variables compartidas: si un proceso necesita un
+dato de otro, se le tiene que enviar con un mensaje MPI.
+Este estilo se llama SPMD (Single Program, Multiple Data).
+
+¿Por qué este programa se paraleliza bien?
+  - Cada punto (x, y) de la malla se calcula de forma independiente: solo
+    necesita la lista de cargas. No hay dependencias entre puntos.
+  - Por eso se puede repartir la malla por BLOQUES DE FILAS: cada proceso
+    calcula sus filas y al final se juntan todas en el rank 0.
+
+Esquema de la estrategia A (paralelismo de datos):
+
+    rank 0: lee espacio.txt
+       |
+       |  MPI_Bcast (ancho, alto, n)  ------>  todos
+       |  MPI_Bcast (cargas)          ------>  todos
+       v
+    cada proceso calcula V y E de SUS filas         <- cálculo en paralelo
+       |
+       |  MPI_Gatherv (filas de V)    ------>  rank 0
+       |  MPI_Gatherv (filas de E)    ------>  rank 0
+       v
+    rank 0: dibuja y muestra los tiempos
+
+Funciones del rank 0 en particular: leer el fichero, recibir los resultados,
+dibujar e imprimir. El resto de procesos solo calculan.
+
+
+-------------------------------------------------------------------------------
+1. PREPARACIÓN
+-------------------------------------------------------------------------------
+
+1) Copiar el programa secuencial a un fichero nuevo. NO tocar campo.cpp: lo
+   necesitamos como referencia para calcular el speed-up.
+
+       cp campo.cpp campo_mpi.cpp
+
+2) Añadir al Makefile (el sangrado de la segunda línea tiene que ser un
+   TABULADOR, no espacios):
+
+       campo_mpi: campo_mpi.cpp
+       	mpic++ -O2 -std=c++11 -o campo_mpi campo_mpi.cpp
+
+   mpic++ es g++ con las rutas de las cabeceras y librerías de MPI ya
+   puestas; no hay que añadir -lmpi a mano.
+
+3) Añadir "campo_mpi" al .gitignore (es un binario generado).
+
+4) En campo_mpi.cpp, cambiar los includes del principio:
+
+       #include <mpi.h>        // AÑADIR: la librería MPI
+       #include <algorithm>    // AÑADIR: para std::min
+       // #include <chrono>    // QUITAR: ahora se mide con MPI_Wtime
+
+   El resto de includes, las constantes, struct Carga, leer_espacio() y
+   dibujar() se quedan EXACTAMENTE igual.
+
+
+-------------------------------------------------------------------------------
+2. PASO 1 - INICIALIZAR MPI   (al principio de main)
+-------------------------------------------------------------------------------
+
+    int main(int argc, char** argv) {
+        MPI_Init(&argc, &argv);
+        int rank, nprocs;
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+
+        const char* ruta = (argc > 1) ? argv[1] : "espacio.txt";
+
+Línea a línea:
+  MPI_Init(&argc, &argv);
+      Arranca el entorno MPI. Tiene que ser la PRIMERA llamada MPI. Recibe
+      argc/argv porque mpirun puede añadir argumentos propios que MPI quita.
+  int rank, nprocs;
+      Variables para "quién soy" y "cuántos somos".
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+      Guarda en rank el número de este proceso (0 .. nprocs-1).
+      MPI_COMM_WORLD es el "comunicador" que agrupa a TODOS los procesos
+      lanzados por mpirun.
+  MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+      Guarda en nprocs el número total de procesos (el -np de mpirun).
+  const char* ruta = ...
+      Igual que en la versión secuencial: fichero de entrada.
+
+
+-------------------------------------------------------------------------------
+3. PASO 2 - LEER EN EL RANK 0 Y REPARTIR LOS DATOS  (MPI_Bcast)
+-------------------------------------------------------------------------------
+
+Solo el rank 0 lee el fichero (si lo leyeran todos, en el clúster cada nodo
+necesitaría su copia del fichero y se harían N lecturas de disco). Después
+se envía a los demás lo que necesitan: el tamaño de la malla y las cargas.
+
+        int dims[3] = {0, 0, 0};
+        std::vector<Carga> cargas;
+        if (rank == 0) {
+            int ancho = 0, alto = 0;
+            if (leer_espacio(ruta, ancho, alto, cargas)) {
+                dims[0] = ancho;
+                dims[1] = alto;
+                dims[2] = static_cast<int>(cargas.size());
+            } else {
+                std::fprintf(stderr, "Error: no se pudo leer '%s'\n", ruta);
+            }
+        }
+        MPI_Bcast(dims, 3, MPI_INT, 0, MPI_COMM_WORLD);
+        if (dims[2] == 0) { MPI_Finalize(); return 1; }
+        const int ancho = dims[0], alto = dims[1], n = dims[2];
+        if (rank != 0) cargas.resize(n);
+        MPI_Bcast(cargas.data(), 3 * n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+Línea a línea:
+  int dims[3] = {0, 0, 0};
+      Empaquetamos ancho, alto y nº de cargas en un array para enviarlos en
+      UN solo mensaje en vez de tres (cada mensaje tiene un coste fijo de
+      latencia, así que menos mensajes = menos sobrecarga).
+  std::vector<Carga> cargas;
+      Todos los procesos declaran el vector, pero de momento solo el rank 0
+      lo va a llenar.
+  if (rank == 0) { ... leer_espacio(...) ... }
+      Solo el proceso 0 lee el fichero y rellena dims.
+      Si la lectura falla, dims se queda a cero (eso lo usamos abajo).
+  MPI_Bcast(dims, 3, MPI_INT, 0, MPI_COMM_WORLD);
+      Difusión (broadcast), comunicación COLECTIVA: la tienen que llamar
+      TODOS los procesos. Argumentos:
+        dims            -> buffer: en el rank 0 es lo que se envía; en el
+                           resto es donde se recibe.
+        3               -> número de elementos.
+        MPI_INT         -> tipo de cada elemento.
+        0               -> rank raíz (el que envía).
+        MPI_COMM_WORLD  -> entre qué procesos.
+      Al volver, todos tienen dims con los mismos valores.
+  if (dims[2] == 0) { MPI_Finalize(); return 1; }
+      Si el rank 0 no pudo leer el fichero, dims llega a cero a todos y
+      TODOS terminan a la vez. Si solo terminase el 0, los demás se
+      quedarían bloqueados esperando un mensaje que nunca llega.
+  const int ancho = ..., alto = ..., n = ...;
+      Desempaquetamos dims en variables con nombre.
+  if (rank != 0) cargas.resize(n);
+      Los procesos que no han leído el fichero reservan sitio para recibir
+      las n cargas. MPI NO reserva memoria: el buffer de recepción tiene que
+      existir y tener el tamaño correcto antes de recibir.
+  MPI_Bcast(cargas.data(), 3 * n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+      Envía el vector entero de cargas. Truco: struct Carga son 3 double
+      seguidos (q, x, y) y std::vector guarda los elementos contiguos, así
+      que el vector es, en memoria, un array de 3*n doubles.
+      cargas.data() da el puntero a ese array.
+      (Alternativa más "formal" para la memoria: crear un tipo derivado con
+       MPI_Type_contiguous(3, MPI_DOUBLE, &tipo_carga) + MPI_Type_commit y
+       enviar n elementos de tipo_carga.)
+
+
+-------------------------------------------------------------------------------
+4. PASO 3 - REPARTIR LAS FILAS   (función nueva, antes de main)
+-------------------------------------------------------------------------------
+
+    static void repartir_filas(int alto, int ancho, int nprocs,
+                               std::vector<int>& counts, std::vector<int>& displs) {
+        counts.resize(nprocs);
+        displs.resize(nprocs);
+        const int base  = alto / nprocs;
+        const int resto = alto % nprocs;
+        for (int p = 0; p < nprocs; ++p) {
+            const int y0    = p * base + std::min(p, resto);
+            const int filas = base + (p < resto ? 1 : 0);
+            counts[p] = filas * ancho;
+            displs[p] = y0 * ancho;
+        }
+    }
+
+Para qué sirve: decide qué filas calcula cada proceso y prepara los dos
+arrays que pide MPI_Gatherv (paso 7).
+
+Línea a línea:
+  counts.resize(nprocs); displs.resize(nprocs);
+      Un valor por proceso.
+  const int base = alto / nprocs;
+      Filas que le tocan como mínimo a cada proceso.
+  const int resto = alto % nprocs;
+      Filas que sobran si la división no es exacta.
+  const int y0 = p * base + std::min(p, resto);
+      Primera fila del proceso p. Los "resto" primeros procesos se llevan
+      una fila extra, así que hay que desplazar el inicio.
+  const int filas = base + (p < resto ? 1 : 0);
+      Número de filas del proceso p (base, o base+1 si es de los primeros).
+  counts[p] = filas * ancho;
+      Cuántos doubles calcula el proceso p (filas completas de ancho puntos).
+  displs[p] = y0 * ancho;
+      En qué posición de la malla completa empieza su trozo (la malla es un
+      vector 1D guardado por filas: fila y empieza en y * ancho).
+
+Ejemplo: alto = 10, nprocs = 3  ->  base = 3, resto = 1
+      proceso 0: filas 0..3 (4 filas)
+      proceso 1: filas 4..6 (3 filas)
+      proceso 2: filas 7..9 (3 filas)
+  La diferencia máxima es de 1 fila: la carga está EQUILIBRADA, y como
+  todas las filas cuestan lo mismo no hace falta un reparto dinámico.
+
+Por qué por filas y no por columnas: la malla se guarda por filas, así que
+el trozo de cada proceso es un bloque CONTIGUO de memoria y se puede enviar
+en un solo mensaje sin copiar nada (ver la Tarea 0, recorrido de matrices).
+
+En main, después del paso 2:
+
+        std::vector<int> counts, displs;
+        repartir_filas(alto, ancho, nprocs, counts, displs);
+        const int y0    = displs[rank] / ancho;
+        const int filas = counts[rank] / ancho;
+
+  Cada proceso calcula el reparto de TODOS (es barato y así no hace falta
+  comunicarlo) y se queda con su primera fila (y0) y su número de filas.
+
+
+-------------------------------------------------------------------------------
+5. PASO 4 - ADAPTAR LOS NÚCLEOS DE CÁLCULO
+-------------------------------------------------------------------------------
+
+Ahora cada proceso solo calcula algunas filas. Hay que cambiar 3 líneas en
+calcular_potencial (y las mismas 3 en calcular_campo, con E en vez de V):
+
+  ANTES:
+    static void calcular_potencial(int ancho, int alto,
+    ...
+        for (int y = 0; y < alto; ++y) {
+            const double py = static_cast<double>(y);
+            double* fila = &V[static_cast<size_t>(y) * ancho];
+
+  DESPUÉS:
+    static void calcular_potencial(int ancho, int y0, int filas,
+    ...
+        for (int f = 0; f < filas; ++f) {
+            const double py = static_cast<double>(y0 + f);
+            double* fila = &V[static_cast<size_t>(f) * ancho];
+
+Línea a línea:
+  (int ancho, int y0, int filas, ...)
+      En vez del alto total, recibe la primera fila y cuántas filas calcular.
+  for (int f = 0; f < filas; ++f)
+      f es el número de fila LOCAL (0 .. filas-1) dentro del trozo del proceso.
+  const double py = static_cast<double>(y0 + f);
+      La coordenada física y es la fila GLOBAL: y0 + f. Esto es lo
+      importante: si pusiéramos solo f, todos los procesos calcularían la
+      parte de arriba de la malla.
+  double* fila = &V[static_cast<size_t>(f) * ancho];
+      V ahora es el buffer LOCAL del proceso (solo sus filas), así que se
+      indexa con la fila local f.
+
+El bucle interior (sobre x y sobre las cargas) NO cambia.
+
+
+-------------------------------------------------------------------------------
+6. PASO 5 - RESERVAR MEMORIA
+-------------------------------------------------------------------------------
+
+        std::vector<double> Vloc(static_cast<size_t>(filas) * ancho);
+        std::vector<double> Eloc(static_cast<size_t>(filas) * ancho);
+        std::vector<double> V, E;
+        if (rank == 0) {
+            V.resize(static_cast<size_t>(ancho) * alto);
+            E.resize(static_cast<size_t>(ancho) * alto);
+        }
+
+Línea a línea:
+  Vloc, Eloc
+      Buffers locales: cada proceso solo guarda SUS filas. Con N procesos
+      cada uno usa 1/N de la memoria (importante en el caso de 11000, que
+      ocupa ~1,9 GB entero).
+  std::vector<double> V, E;
+      Las mallas completas. Vacías en todos los procesos menos el 0.
+  if (rank == 0) { V.resize(...); E.resize(...); }
+      Solo el rank 0 necesita las mallas completas, porque es el que recibe
+      los resultados y dibuja.
+  static_cast<size_t>(...)
+      Igual que en el secuencial: evita desbordar int al multiplicar.
+
+
+-------------------------------------------------------------------------------
+7. PASO 6 - MEDIR EL TIEMPO Y CALCULAR
+-------------------------------------------------------------------------------
+
+        MPI_Barrier(MPI_COMM_WORLD);
+        const double t0 = MPI_Wtime();
+        calcular_potencial(ancho, y0, filas, cargas, Vloc);
+        calcular_campo(ancho, y0, filas, cargas, Eloc);
+        const double t1 = MPI_Wtime();
+
+Línea a línea:
+  MPI_Barrier(MPI_COMM_WORLD);
+      Barrera: ningún proceso sigue hasta que TODOS han llegado aquí. Sirve
+      para que todos empiecen a medir a la vez (si no, el rank 0, que ha
+      leído el fichero, iría por detrás de los demás).
+  const double t0 = MPI_Wtime();
+      Reloj de MPI en segundos (double). Sustituye a std::chrono.
+  calcular_potencial(... Vloc); calcular_campo(... Eloc);
+      Cada proceso calcula sus filas. ESTA es la parte paralela: todos los
+      procesos ejecutan estas dos líneas a la vez, cada uno con su trozo.
+  const double t1 = MPI_Wtime();
+      Fin del cálculo. t1 - t0 = tiempo de procesamiento de este proceso.
+
+
+-------------------------------------------------------------------------------
+8. PASO 7 - REUNIR LOS RESULTADOS EN EL RANK 0  (MPI_Gatherv)
+-------------------------------------------------------------------------------
+
+        MPI_Gatherv(Vloc.data(), counts[rank], MPI_DOUBLE,
+                    V.data(), counts.data(), displs.data(), MPI_DOUBLE,
+                    0, MPI_COMM_WORLD);
+        MPI_Gatherv(Eloc.data(), counts[rank], MPI_DOUBLE,
+                    E.data(), counts.data(), displs.data(), MPI_DOUBLE,
+                    0, MPI_COMM_WORLD);
+        const double t2 = MPI_Wtime();
+
+MPI_Gatherv es una comunicación COLECTIVA (la llaman todos): cada proceso
+envía su trozo y el raíz los coloca en su sitio dentro de un único buffer.
+Se usa la versión "v" (variable) porque los trozos pueden tener tamaños
+distintos (cuando alto no es divisible entre nprocs). Si todos fueran
+iguales bastaría con MPI_Gather.
+
+Argumentos (en orden):
+  Vloc.data()      -> qué envío yo (mis filas).
+  counts[rank]     -> cuántos doubles envío yo.
+  MPI_DOUBLE       -> tipo de lo que envío.
+  V.data()         -> dónde recibe el raíz (malla completa). En los demás
+                      procesos se ignora (por eso V puede estar vacío).
+  counts.data()    -> cuántos doubles recibe el raíz de CADA proceso.
+  displs.data()    -> en qué posición de V coloca el trozo de cada proceso.
+  MPI_DOUBLE       -> tipo de lo que se recibe.
+  0                -> rank raíz (el que recibe).
+  MPI_COMM_WORLD   -> comunicador.
+
+  const double t2 = MPI_Wtime();
+      t2 - t1 = tiempo de comunicación + espera. OJO: en el rank 0 incluye
+      también el tiempo que espera a que acabe el proceso más lento
+      (sincronización implícita del Gatherv). Esto viene bien para la
+      pregunta 3 de la evaluación (procesamiento vs comunicación).
+
+
+-------------------------------------------------------------------------------
+9. PASO 8 - TIEMPO GLOBAL (MPI_Reduce) Y SALIDA
+-------------------------------------------------------------------------------
+
+        double tloc[2] = {t1 - t0, t2 - t0};
+        double tmax[2];
+        MPI_Reduce(tloc, tmax, 2, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+        if (rank == 0) {
+            std::printf("Espacio: %d x %d um   Cargas: %d   Procesos: %d\n",
+                        ancho, alto, n, nprocs);
+            ... (las dos llamadas a dibujar() igual que en el secuencial) ...
+            std::printf("\nTiempo de calculo (max):         %.3f s\n", tmax[0]);
+            std::printf("Tiempo total con comunicacion:   %.3f s\n", tmax[1]);
+        }
+
+Línea a línea:
+  double tloc[2] = {t1 - t0, t2 - t0};
+      Tiempos de ESTE proceso: solo cálculo, y cálculo + comunicación.
+  MPI_Reduce(tloc, tmax, 2, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+      Reducción COLECTIVA: combina los valores de todos los procesos con una
+      operación (aquí MPI_MAX, el máximo) y deja el resultado en el raíz (0).
+      Se hace sobre los 2 valores a la vez, elemento a elemento.
+      Por qué el MÁXIMO: el programa paralelo no termina hasta que acaba el
+      proceso más lento (lo pide el enunciado: "el tiempo total debe
+      considerar el trabajo de todos los procesos").
+  if (rank == 0) { ... }
+      Solo el rank 0 imprime y dibuja (si no, saldría todo N veces).
+      Es el único que tiene V y E completos.
+
+Speed-up = tiempo secuencial (campo.cpp) / tmax[1]
+Eficiencia = speed-up / nprocs
+
+
+-------------------------------------------------------------------------------
+10. PASO 9 - FINALIZAR
+-------------------------------------------------------------------------------
+
+        MPI_Finalize();
+        return 0;
+    }
+
+  MPI_Finalize();
+      Cierra MPI. Tiene que ser la ÚLTIMA llamada MPI y la tienen que hacer
+      TODOS los procesos. Después no se puede usar ninguna función MPI.
+
+
+-------------------------------------------------------------------------------
+11. ESTRATEGIA B: PARALELISMO FUNCIONAL   (fichero aparte, p. ej. campo_mpi_func.cpp)
+-------------------------------------------------------------------------------
+
+Idea: el potencial y el campo son independientes (lo dice el README), así
+que en vez de que todos calculen las dos cosas, dividimos los procesos en
+DOS GRUPOS: uno calcula V y el otro E. Dentro de cada grupo se reparten las
+filas igual que en la estrategia A.
+
+    grupo 0 (ranks 0 .. nV-1)      -> potencial V
+    grupo 1 (ranks nV .. nprocs-1) -> campo E
+
+Los pasos 1, 2, 4 y 9 son iguales. Cambia lo demás:
+
+        if (nprocs < 2) {
+            if (rank == 0) std::fprintf(stderr, "La estrategia B necesita al menos 2 procesos\n");
+            MPI_Finalize();
+            return 1;
+        }
+        const int nV    = nprocs / 2;
+        const int color = (rank < nV) ? 0 : 1;
+        MPI_Comm grupo;
+        MPI_Comm_split(MPI_COMM_WORLD, color, rank, &grupo);
+        int grank, gsize;
+        MPI_Comm_rank(grupo, &grank);
+        MPI_Comm_size(grupo, &gsize);
+
+Línea a línea:
+  if (nprocs < 2) ...
+      Con un solo proceso no se pueden formar dos grupos.
+  const int nV = nprocs / 2;
+      Cuántos procesos van al potencial. El resto van al campo (con número
+      impar de procesos, el campo se lleva uno más, lo que viene bien porque
+      el campo es ~20% más caro). Se puede probar otro reparto y comparar.
+  const int color = (rank < nV) ? 0 : 1;
+      A qué grupo pertenece este proceso.
+  MPI_Comm grupo;
+      Un comunicador nuevo (un "subgrupo" de procesos).
+  MPI_Comm_split(MPI_COMM_WORLD, color, rank, &grupo);
+      Divide MPI_COMM_WORLD: los procesos con el mismo color quedan en el
+      mismo comunicador. El tercer argumento (rank) decide el orden dentro
+      del grupo. Es colectiva: la llaman todos.
+  MPI_Comm_rank(grupo, &grank); MPI_Comm_size(grupo, &gsize);
+      Rank y tamaño DENTRO del grupo. Ojo: el world rank nV es el grank 0
+      del grupo 1.
+
+Reparto y memoria (igual que en A pero con gsize/grank y un solo buffer):
+
+        std::vector<int> counts, displs;
+        repartir_filas(alto, ancho, gsize, counts, displs);
+        const int y0    = displs[grank] / ancho;
+        const int filas = counts[grank] / ancho;
+
+        std::vector<double> loc(static_cast<size_t>(filas) * ancho);
+        std::vector<double> malla;
+        if (grank == 0) malla.resize(static_cast<size_t>(ancho) * alto);
+
+  loc     -> las filas de este proceso (de V o de E según el grupo).
+  malla   -> la malla completa del grupo; solo la reserva el raíz de cada
+             grupo (world rank 0 para V, world rank nV para E).
+
+Cálculo:
+
+        MPI_Barrier(MPI_COMM_WORLD);
+        const double t0 = MPI_Wtime();
+        if (color == 0) calcular_potencial(ancho, y0, filas, cargas, loc);
+        else            calcular_campo(ancho, y0, filas, cargas, loc);
+        const double t1 = MPI_Wtime();
+
+  Cada grupo ejecuta una FUNCIÓN distinta: esto es el paralelismo funcional
+  (en A, en cambio, todos ejecutan las mismas funciones sobre datos
+  distintos: paralelismo de datos).
+
+Reunir resultados (2 fases):
+
+        MPI_Gatherv(loc.data(), counts[grank], MPI_DOUBLE,
+                    malla.data(), counts.data(), displs.data(), MPI_DOUBLE,
+                    0, grupo);
+
+  Fase 1: cada grupo junta sus filas en SU raíz (el último argumento es
+  "grupo", no MPI_COMM_WORLD). Los dos Gatherv ocurren en paralelo.
+  Tras esto, el world rank 0 tiene V completo y el world rank nV tiene E.
+
+        std::vector<double>& V = malla;
+        std::vector<double> E;
+        const int total = ancho * alto;
+        if (rank == nV) {
+            MPI_Send(malla.data(), total, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+        } else if (rank == 0) {
+            E.resize(total);
+            MPI_Recv(E.data(), total, MPI_DOUBLE, nV, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        const double t2 = MPI_Wtime();
+
+  Fase 2: el raíz del grupo del campo envía E al rank 0 con comunicación
+  PUNTO A PUNTO (un emisor, un receptor).
+  std::vector<double>& V = malla;
+      En el rank 0, "malla" es el potencial; le damos el nombre V para que
+      el código de dibujo sea el mismo que en A (es una referencia, no copia).
+  MPI_Send(buffer, cantidad, tipo, destino, etiqueta, comunicador)
+      destino = 0 (world rank 0); etiqueta = 0 (un número que identifica el
+      mensaje; el Recv tiene que usar la misma).
+  MPI_Recv(buffer, cantidad, tipo, origen, etiqueta, comunicador, status)
+      Bloquea hasta que llega el mensaje del proceso nV con etiqueta 0.
+      MPI_STATUS_IGNORE: no nos interesa la información extra del mensaje.
+  total = ancho * alto
+      Cabe en int incluso con 11000 x 11000 (1,21e8 < 2,1e9).
+
+Después: MPI_Reduce de los tiempos y dibujo igual que en el paso 8, y antes
+de MPI_Finalize hay que liberar el comunicador creado:
+
+        MPI_Comm_free(&grupo);
+
+Qué comparar en la memoria entre A y B:
+  - B está DESEQUILIBRADA: el campo cuesta ~20% más que el potencial, así
+    que el grupo del potencial termina antes y espera sin hacer nada.
+  - B envía E dos veces (Gatherv dentro del grupo + Send al rank 0): más
+    volumen de comunicación que A.
+  - B puede ser útil si se ajusta nV para equilibrar (p. ej. nV ≈ 0,45 *
+    nprocs) o si los núcleos tuvieran costes muy distintos.
+  Medida en local (16 núcleos, espacio_5000, secuencial 6,45 s):
+       np    A total    B total
+        2     3,29 s     3,57 s
+        4     1,67 s     1,79 s
+        8     0,85 s     0,92 s
+  En el clúster la comunicación pesará mucho más (va por la red).
+
+
+-------------------------------------------------------------------------------
+12. COMPILAR, EJECUTAR Y COMPROBAR
+-------------------------------------------------------------------------------
+
+Compilar:
+    make campo_mpi
+    (o a mano: mpic++ -O2 -std=c++11 -o campo_mpi campo_mpi.cpp)
+
+Ejecutar en local con 4 procesos:
+    mpirun -np 4 ./campo_mpi casos/espacio_5000.txt
+
+Más procesos que núcleos (solo para probar, los tiempos no valen):
+    mpirun --oversubscribe -np 20 ./campo_mpi ejemplo.txt
+
+En el clúster del laboratorio (ver Tarea 2: SSH sin contraseña, mismo
+ejecutable y casos/ en la misma ruta en todos los nodos):
+    mpirun -mca plm_rsh_no_tree_spawn 1 -hostfile hosts -n 6 ./campo_mpi casos/espacio_5000.txt
+
+Comprobar que el resultado es correcto (el dibujo tiene que ser idéntico al
+secuencial; se quitan las líneas de tiempos, que cambian siempre):
+    ./campo casos/espacio_2000.txt | grep -v -e Tiempo -e Espacio > ref.txt
+    mpirun -np 3 ./campo_mpi casos/espacio_2000.txt | grep -v -e Tiempo -e Espacio | diff - ref.txt && echo IGUAL
+  Probar con varios -np, incluyendo alguno que no divida al alto (3, 7).
+
+Para las gráficas: ejecutar cada caso de casos/ con -np 1, 2, 4, 8, ... y
+varios nodos, repetir cada medida 3-5 veces y quedarse con la media o la
+mediana. Guardar los tiempos en un CSV.
+
+
+-------------------------------------------------------------------------------
+13. ERRORES TÍPICOS
+-------------------------------------------------------------------------------
+
+- El programa se queda colgado: algún proceso no ha llamado a una función
+  colectiva (Bcast, Gatherv, Reduce, Barrier, Comm_split) que sí han
+  llamado los demás, o un Recv espera un mensaje que nadie envía. Las
+  colectivas se llaman SIEMPRE desde todos los procesos del comunicador,
+  nunca dentro de un if (rank == 0).
+- Segmentation fault al recibir: el buffer de recepción no tenía el tamaño
+  correcto (falta el cargas.resize(n) o el V.resize en el raíz).
+- Todas las filas salen iguales / la imagen sale repetida: en el núcleo se
+  usó la fila local f en vez de la global y0 + f para calcular py.
+- Se imprime todo N veces: falta el if (rank == 0) alrededor de los printf.
+- Tiempos raros: medir sin MPI_Barrier antes de t0, o tomar el tiempo de un
+  solo proceso en vez del máximo (MPI_Reduce con MPI_MAX).
