@@ -172,3 +172,35 @@ Si la malla es mayor que el área de dibujo (100 × 50 celdas) se promedian bloq
 cuadrados de celdas, con el mismo factor en ambos ejes para no deformar la imagen.
 Cada celda se pinta como dos espacios con color de fondo RGB (`\033[48;2;R;G;Bm`),
 por lo que hace falta un terminal con soporte de color verdadero.
+
+## Versiones MPI y medición (Práctica 3)
+
+- `campo_mpi.cpp` — estrategia A, paralelismo de datos (bloques de filas, `MPI_Bcast` + `MPI_Gatherv`).
+- `campo_mpi_func.cpp` — estrategia B, paralelismo funcional (`MPI_Comm_split`: un grupo calcula V y otro E).
+
+```sh
+make mpi                                          # compila las dos
+make run_mpi NP=8 CASO=casos/espacio_9000.txt     # ejecución local
+```
+
+Medición y gráficas (las gráficas requieren `pip install matplotlib`):
+
+```sh
+python3 scripts/medir.py --casos espacio.txt serieA --np 2 4 8 --reps 3                  # local
+python3 scripts/medir.py --casos serieA serieB --np 3 6 12 --hostfile hosts --etiqueta lab  # clúster
+python3 scripts/graficas.py                       # lee resultados/medidas.csv
+```
+
+`medir.py` añade filas a `resultados/medidas.csv` (fecha, programa, caso, np, nodos, repetición y
+tiempos de cálculo, comunicación y total). `graficas.py` genera en `resultados/graficas/`:
+
+| Fichero | Contenido |
+|---|---|
+| `resumen.csv` | media y desviación de cada configuración, % de comunicación, speed-up y eficiencia |
+| `speedup_<caso>.png` | speed-up y eficiencia frente a np, con la recta ideal |
+| `comunicacion_<caso>.png` | tiempo de cálculo frente a comunicación y espera para cada np |
+| `tallas_<serie>.png` | speed-up y eficiencia frente al tamaño del problema, un panel por np |
+
+El speed-up se calcula frente a la media del secuencial (`campo`) en el mismo caso, así que hay que
+medir también `campo` en cada tanda (`medir.py` lo hace por defecto). Para el clúster, copia
+`hosts.ejemplo` a `hosts` con las IP reales.
