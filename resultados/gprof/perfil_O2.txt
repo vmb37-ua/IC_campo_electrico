@@ -1,0 +1,25 @@
+Flat profile:
+
+Each sample counts as 0.01 seconds.
+  %   cumulative   self              self     total           
+ time   seconds   seconds    calls  ms/call  ms/call  name    
+ 99.23      6.44     6.44                             main
+  0.77      6.49     0.05        2    25.00    25.00  frame_dummy
+
+			Call graph
+
+
+granularity: each sample hit covers 4 byte(s) for 0.15% of 6.49 seconds
+
+index % time    self  children    called     name
+                                                 <spontaneous>
+[1]    100.0    6.44    0.05                 main [1]
+                0.05    0.00       2/2           frame_dummy [2]
+-----------------------------------------------
+                0.05    0.00       2/2           main [1]
+[2]      0.8    0.05    0.00       2         frame_dummy [2]
+-----------------------------------------------
+
+Index by function name
+
+   [2] frame_dummy             [1] main
